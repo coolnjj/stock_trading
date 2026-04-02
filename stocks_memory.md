@@ -183,20 +183,28 @@
 
 ## 任务追踪系统
 
-### trading_task.db 表结构
-- `tasks` - 任务表（名称/类型/来源/状态/优先级/完成总结/经验教训）
-- `trading_days` - 交易日追踪（盈亏/胜率/任务完成状态）
-- `task_executions` - 任务执行日志
-- `strategy_runs` - 四周期策略运行记录
+### 统一入口：stock_trading.py
+所有股票交易功能通过单一入口调用：
+```bash
+python3 stock_trading.py [check|signal|review|brief|init|all]
+  check  - 盘前检查（6模块）
+  signal - 交易信号报告（14:30）
+  review - 收盘复盘（15:05）
+  brief  - 每日简报
+  init   - 初始化数据库和任务
+  all    - 初始化+简报
+```
 
-### 每日自动化任务（已注册）
-| 任务 | 时间 | 优先级 | 状态追踪 |
-|------|------|--------|---------|
-| 每日盘前检查（6模块） | 09:15 | 1 | ✅ 已集成task_tracker |
-| 生成每日交易信号报告 | 14:30 | 2 | ✅ 已集成task_tracker |
-| 执行每日收盘复盘 | 15:05 | 2 | ✅ 已集成task_tracker |
-| 检视000582四周期策略 | 每日 | 3 | ✅ 已集成task_tracker |
-| 检视600676四周期策略 | 每日 | 3 | ✅ 已集成task_tracker |
+### 数据库
+- `trading_task.db` — 任务表/交易日追踪/执行日志/策略运行记录
+- `trading.db` — 持仓/交易记录/每日检查日志
+
+### 每日自动化 cron 任务（统一入口）
+| 任务 | cron | 触发命令 |
+|------|------|---------|
+| 每日盘前检查 | 09:15 | `python3 stock_trading.py check` |
+| 每日交易信号报告 | 14:30 | `python3 stock_trading.py signal` |
+| 每日收盘复盘 | 15:05 | `python3 stock_trading.py review` |
 
 ### 虾主布置任务
 > 暂无（虾主可通过聊天布置任务，系统自动注册追踪）
