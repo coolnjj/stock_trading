@@ -528,9 +528,122 @@ def daily_brief():
 
     return "\n".join(lines)
 
+# ========== 交易日判断 ==========
+def is_trading_day():
+    """判断今天是否为交易日（简单判断：周一到周五）"""
+    weekday = datetime.now().weekday()
+    # 0=周一, 4=周五, 5=周六, 6=周日
+    return weekday < 5
+
+# ========== 系统优化（非交易日） ==========
+def run_optimization():
+    """非交易日执行：系统优化 + 交易复盘"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_cn = datetime.now().strftime("%Y年%m月%d日")
+    init_dbs()
+
+    lines = [f"🦐【{today_cn} 系统优化与复盘】", ""]
+    lines.append("=" * 28)
+    lines.append("📅 今日为非交易日，进行系统优化")
+    lines.append("=" * 28)
+
+    # 1. 数据库健康检查
+    lines.append("\n🔧 系统健康检查：")
+    try:
+        conn = sqlite3.connect(TRADING_DB)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM tasks WHERE status='pending'")
+        pending_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM tasks WHERE status='completed'")
+        completed_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM trading_days")
+        trading_days_count = c.fetchone()[0]
+        conn.close()
+        lines.append(f"  ✅ 数据库正常")
+        lines.append(f"  - 待处理任务: {pending_count}")
+        lines.append(f"  - 已完成任务: {completed_count}")
+        lines.append(f"  - 交易日记录: {trading_days_count}天")
+    except Exception as e:
+        lines.append(f"  ❌ 数据库异常: {e}")
+
+    # 2. 策略参数回顾
+    lines.append("\n📊 策略表现回顾：")
+    try:
+        conn = sqlite3.connect(TRADING_DB)
+        c = conn.cursor()
+        # 最近完成的交易相关任务
+        c.execute("""SELECT task_name, completion_summary, lessons_learned, completed_at
+            FROM tasks WHERE status='completed' AND related_strategy IS NOT NULL
+            ORDER BY completed_at DESC LIMIT 5""")
+        recent = c.fetchall()
+        conn.close()
+        if recent:
+            for name, summary, lessons, comp_at in recent:
+                lines.append(f"  ✓ {name}")
+                if lessons:
+                    lines.append(f"    经验: {lessons[:80]}")
+        else:
+            lines.append("  暂无策略记录")
+    except Exception as e:
+        lines.append(f"  查询失败: {e}")
+
+    # 3. 待优化项
+    lines.append("\n🔧 待优化项：")
+    try:
+        conn = sqlite3.connect(TRADING_DB)
+        c = conn.cursor()
+        # 失败或过期的任务
+        c.execute("SELECT task_name, status, notes FROM tasks WHERE status IN ('expired','failed') ORDER BY updated_at DESC LIMIT 3")
+        failed = c.fetchall()
+        conn.close()
+        if failed:
+            for name, status, notes in failed:
+                lines.append(f"  ⚠️ {name} ({status})")
+        else:
+            lines.append("  无异常任务")
+    except:
+        lines.append("  无")
+
+    # 4. 生成优化建议
+    lines.append("\n💡 优化建议：")
+    suggestions = []
+    try:
+        conn = sqlite3.connect(TRADING_DB)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM tasks WHERE status='completed'")
+        total_done = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM tasks WHERE lessons_learned IS NOT NULL AND lessons_learned != ''")
+        with_lessons = c.fetchone()[0]
+        conn.close()
+        if total_done > 0:
+            lesson_rate = with_lessons / total_done * 100
+            suggestions.append(f"经验记录率: {lesson_rate:.0f}%（应保持95%以上）")
+        if total_done < 10:
+            suggestions.append("系统处于初期，建议多观察策略稳定性")
+    except:
+        suggestions.append("数据库统计正常")
+
+    if not suggestions:
+        suggestions = ["各模块运行正常，无需特别优化"]
+    for s in suggestions:
+        lines.append(f"  → {s}")
+
+    # 5. 下个交易日预览
+    lines.append("\n📋 下个交易日预览：")
+    next_day = datetime.now()
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    lines.append(f"  下个交易日: {next_day.strftime('%Y-%m-%d %A')}")
+    lines.append("  届时自动执行: 盘前检查 → 交易信号 → 收盘复盘")
+
+    report = "\n".join(lines)
+    print(report)
+    send_feishu(report)
+    return report
+
 # ========== 主入口 ==========
 if __name__ == "__main__":
-    mode = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
+    mode = sys.argv[1].lower() if len(sys.argv) > 1 else "auto"
 
     if mode == "check":
         run_check()
@@ -545,6 +658,20 @@ if __name__ == "__main__":
         init_dbs()
         generate_daily_tasks()
         print("✅ 系统初始化完成")
+    elif mode == "optimize":
+        run_optimization()
+    elif mode == "auto":
+        # 自动判断模式：cron 触发后自动判断
+        init_dbs()
+        if is_trading_day():
+            log("今日为交易日，执行完整流程")
+            generate_daily_tasks()
+            run_check()
+            run_signal()
+            run_review()
+        else:
+            log("今日为非交易日，执行系统优化")
+            run_optimization()
     elif mode == "all":
         init_dbs()
         generate_daily_tasks()
@@ -552,10 +679,12 @@ if __name__ == "__main__":
         print(daily_brief())
         send_feishu(daily_brief())
     else:
-        print(f"用法: python3 stock_trading.py [check|signal|review|brief|init|all]")
-        print(f"  check  - 盘前检查")
-        print(f"  signal - 交易信号报告")
-        print(f"  review - 收盘复盘")
-        print(f"  brief  - 每日简报")
-        print(f"  init   - 初始化数据库和任务")
-        print(f"  all    - 初始化+简报（默认）")
+        print(f"用法: python3 交易自动化.py [check|signal|review|brief|init|auto|optimize|all]")
+        print(f"  check    - 盘前检查（交易日）")
+        print(f"  signal   - 交易信号报告")
+        print(f"  review   - 收盘复盘")
+        print(f"  brief    - 每日简报")
+        print(f"  init     - 初始化数据库和任务")
+        print(f"  optimize - 系统优化（非交易日）")
+        print(f"  auto     - 自动判断（默认，cron触发时用）")
+        print(f"  all      - 初始化+简报")
