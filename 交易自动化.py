@@ -821,6 +821,10 @@ def check_and_alert():
     result = run_self_check()
     overall = result["overall"]
 
+    healthy_count = result["healthy"]
+    degraded_count = result["degraded"]
+    failed_count = result["failed"]
+
     alert_triggered = False
     alert_lines = []
 
@@ -914,15 +918,44 @@ def run_monitor_loop(duration=None):
 
         time.sleep(CRITICAL_CHECK_INTERVAL)
 
+def stop_monitor():
+    """停止旧的monitor进程"""
+    pid_file = f"{WORKSPACE}/monitor.pid"
+    try:
+        with open(pid_file, "r") as f:
+            pid = f.read().strip()
+        if pid:
+            subprocess.run(f"kill {pid} 2>/dev/null", shell=True)
+            log(f"🛑 已停止旧monitor进程 (PID: {pid})")
+    except:
+        pass
+    try:
+        os.remove(pid_file)
+    except:
+        pass
+
 def run_with_monitoring(target_func, *args, **kwargs):
-    """包装函数：在后台启动监控，主线程执行目标函数"""
-    monitor_thread = threading.Thread(target=run_monitor_loop, daemon=True)
-    monitor_thread.start()
+    """包装函数：用nohup启动独立监控进程，主线程执行目标函数"""
+    # 先用nohup启动独立monitor进程
+    monitor_script = f"{WORKSPACE}/交易自动化.py"
+    log_file = f"{WORKSPACE}/monitor.log"
+    pid_file = f"{WORKSPACE}/monitor.pid"
+
+    # 启动monitor进程（nohup后台运行，-u不缓冲）
+    cmd = f"nohup python3 -u '{monitor_script}' monitor >> '{log_file}' 2>&1 &"
+    result = subprocess.run(cmd, shell=True, capture_output=True)
+    log(f"🚀 启动monitor后台进程: {result.returncode == 0}")
+
+    # 写入PID文件，方便管理
+    try:
+        with open(pid_file, "w") as f:
+            f.write(str(subprocess.run("echo $!", shell=True, capture_output=True).stdout.decode().strip()))
+    except:
+        pass
 
     try:
         result = target_func(*args, **kwargs)
-        log("✅ 主任务完成，监控继续...")
-        time.sleep(300)  # 主任务完成后，监控继续运行5分钟
+        log("✅ 主任务完成")
     except Exception as e:
         log(f"❌ 主任务异常: {e}")
         raise
@@ -1054,6 +1087,8 @@ if __name__ == "__main__":
     elif mode == "auto":
         # 自动判断模式：cron 触发后自动判断
         init_dbs()
+        # 先停止旧的monitor
+        stop_monitor()
         if is_trading_day():
             log("今日为交易日，执行完整流程")
             generate_daily_tasks()
@@ -1061,6 +1096,9 @@ if __name__ == "__main__":
         else:
             log("今日为非交易日，执行系统优化")
             run_with_monitoring(run_optimization)
+
+    elif mode == "stop":
+        stop_monitor()
 
     elif mode == "selfcheck":
         # 立即执行一次自检
