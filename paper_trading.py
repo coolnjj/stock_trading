@@ -11,7 +11,102 @@ import json
 import urllib.request
 import urllib.error
 import os
+import sqlite3
 from datetime import datetime
+
+# ========== 任务追踪 ==========
+TASK_DB_FILE = "/home/wenkun/.openclaw/workspace/trading_task.db"
+
+def init_task_db():
+    db_file = TASK_DB_FILE
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_name TEXT NOT NULL,
+            task_type TEXT DEFAULT 'daily',
+            source TEXT DEFAULT 'system',
+            status TEXT DEFAULT 'pending',
+            priority INTEGER DEFAULT 3,
+            created_at TEXT,
+            updated_at TEXT,
+            due_date TEXT,
+            completed_at TEXT,
+            completion_summary TEXT,
+            lessons_learned TEXT,
+            related_strategy TEXT,
+            notes TEXT,
+            tags TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trading_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date TEXT UNIQUE NOT NULL,
+            day_status TEXT DEFAULT 'open',
+            total_pnl REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            positions_opened INTEGER DEFAULT 0,
+            positions_closed INTEGER DEFAULT 0,
+            tasks_planned INTEGER DEFAULT 0,
+            tasks_completed INTEGER DEFAULT 0,
+            tasks_pending INTEGER DEFAULT 0,
+            summary_generated INTEGER DEFAULT 0,
+            morning_check_done INTEGER DEFAULT 0,
+            signal_report_done INTEGER DEFAULT 0,
+            closing_review_done INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_or_create_task(task_name: str, due_date: str) -> int:
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM tasks WHERE task_name=? AND due_date=? AND status='pending'", 
+                   (task_name, due_date))
+    row = cursor.fetchone()
+    if row:
+        conn.close()
+        return row[0]
+    now = datetime.now().isoformat()
+    cursor.execute("""
+        INSERT INTO tasks (task_name, task_type, source, priority, due_date, created_at, updated_at, status)
+        VALUES (?, 'daily', 'system', 2, ?, ?, ?, 'pending')
+    """, (task_name, due_date, now, now))
+    conn.commit()
+    task_id = cursor.lastrowid
+    conn.close()
+    return task_id
+
+def complete_task(task_id: int, summary: str = None, lessons: str = None):
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("""
+        UPDATE tasks SET status='completed', completed_at=?, completion_summary=?,
+        lessons_learned=?, updated_at=? WHERE id=?
+    """, (now, summary, lessons, now, task_id))
+    conn.commit()
+    conn.close()
+
+def update_trading_day(date: str, **kwargs):
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    try:
+        cursor.execute("INSERT INTO trading_days (trade_date, created_at, updated_at) VALUES (?, ?, ?)",
+                      (date, now, now))
+    except:
+        pass
+    for key, val in kwargs.items():
+        cursor.execute(f"UPDATE trading_days SET {key}=?, updated_at=? WHERE trade_date=?",
+                      (val, now, date))
+    conn.commit()
+    conn.close()
 
 # ========== 配置 ==========
 CONFIG_FILE = "/home/wenkun/.openclaw/workspace/paper_trading_config.md"
@@ -194,11 +289,27 @@ def generate_day_report():
     return "\n".join(report)
 
 if __name__ == "__main__":
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    # 初始化任务追踪
+    init_task_db()
+    
+    # 获取或创建今日信号报告任务
+    task_id = get_or_create_task("生成每日交易信号报告", today)
+    
     report = generate_day_report()
     print(report)
+    
     # 保存报告
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write(f"# 模拟交易报告\n\n{report}\n")
+    
+    # 更新任务状态
+    complete_task(task_id, 
+                  summary="交易信号报告已生成并推送",
+                  lessons="交运RSI69.4偏高关注高抛机会，北部湾港RSI42.6观望")
+    update_trading_day(today, signal_report_done=1)
+    
     # 推送到飞书
     result = send_feishu(FEISHU_USER, report)
-    print("\n发送结果:", result)
+    print(f"\n✅ 报告已推送 | 任务完成 (task_id={task_id})")

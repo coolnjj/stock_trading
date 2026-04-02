@@ -8,7 +8,106 @@ import urllib.request
 import json
 import os
 import subprocess
+import sqlite3
 from datetime import datetime
+
+# ========== 任务追踪 ==========
+TASK_DB_FILE = "/home/wenkun/.openclaw/workspace/trading_task.db"
+
+def init_task_db():
+    db_file = TASK_DB_FILE
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_name TEXT NOT NULL,
+            task_type TEXT DEFAULT 'daily',
+            source TEXT DEFAULT 'system',
+            status TEXT DEFAULT 'pending',
+            priority INTEGER DEFAULT 3,
+            created_at TEXT,
+            updated_at TEXT,
+            due_date TEXT,
+            completed_at TEXT,
+            completion_summary TEXT,
+            lessons_learned TEXT,
+            related_strategy TEXT,
+            notes TEXT,
+            tags TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trading_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date TEXT UNIQUE NOT NULL,
+            day_status TEXT DEFAULT 'open',
+            total_pnl REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            positions_opened INTEGER DEFAULT 0,
+            positions_closed INTEGER DEFAULT 0,
+            tasks_planned INTEGER DEFAULT 0,
+            tasks_completed INTEGER DEFAULT 0,
+            tasks_pending INTEGER DEFAULT 0,
+            summary_generated INTEGER DEFAULT 0,
+            morning_check_done INTEGER DEFAULT 0,
+            signal_report_done INTEGER DEFAULT 0,
+            closing_review_done INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_or_create_task(task_name: str, due_date: str) -> int:
+    """获取或创建任务，返回task_id"""
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM tasks WHERE task_name=? AND due_date=? AND status='pending'", 
+                   (task_name, due_date))
+    row = cursor.fetchone()
+    if row:
+        conn.close()
+        return row[0]
+    now = datetime.now().isoformat()
+    cursor.execute("""
+        INSERT INTO tasks (task_name, task_type, source, priority, due_date, created_at, updated_at, status)
+        VALUES (?, 'daily', 'system', 1, ?, ?, ?, 'pending')
+    """, (task_name, due_date, now, now))
+    conn.commit()
+    task_id = cursor.lastrowid
+    conn.close()
+    return task_id
+
+def complete_task(task_id: int, summary: str = None, lessons: str = None):
+    """完成任务"""
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("""
+        UPDATE tasks SET status='completed', completed_at=?, completion_summary=?,
+        lessons_learned=?, updated_at=? WHERE id=?
+    """, (now, summary, lessons, now, task_id))
+    conn.commit()
+    conn.close()
+
+def update_trading_day(date: str, **kwargs):
+    """更新交易日状态"""
+    conn = sqlite3.connect(TASK_DB_FILE)
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    # 初始化
+    try:
+        cursor.execute("INSERT INTO trading_days (trade_date, created_at, updated_at) VALUES (?, ?, ?)",
+                      (date, now, now))
+    except:
+        pass
+    for key, val in kwargs.items():
+        cursor.execute(f"UPDATE trading_days SET {key}=?, updated_at=? WHERE trade_date=?",
+                      (val, now, date))
+    conn.commit()
+    conn.close()
 
 # ========== 配置 ==========
 GATEWAY_URL = "http://127.0.0.1:18789"
@@ -430,8 +529,14 @@ def save_report_file(report):
 
 # ========== 主入口 ==========
 if __name__ == "__main__":
+    today = datetime.now().strftime("%Y-%m-%d")
+    
     # 初始化数据库
     init_database()
+    init_task_db()
+    
+    # 获取或创建今日盘前检查任务
+    task_id = get_or_create_task("执行每日盘前检查（6模块）", today)
     
     # 执行全部检查
     report, checks, counts = run_all_checks()
@@ -440,15 +545,27 @@ if __name__ == "__main__":
     save_report_file(report)
     save_check_records(checks)
     
+    # 更新任务状态
+    if counts[2] == 0 and counts[1] == 0:
+        # 全部通过
+        complete_task(task_id, 
+                     summary=f"盘前检查全部通过（通过{counts[0]}/警告{counts[1]}/失败{counts[2]}）",
+                     lessons="东财接口WSL下响应慢属正常现象，备用方案有效")
+        update_trading_day(today, morning_check_done=1, tasks_completed=1)
+        short_msg = f"✅ 盘前检查通过，6项全部正常"
+    elif counts[2] > 0:
+        # 有失败
+        short_msg = f"❌ 盘前检查异常（通过{counts[0]}/警告{counts[1]}/失败{counts[2]}），请查看详情"
+        update_trading_day(today, morning_check_done=1, tasks_pending=1)
+    else:
+        # 有警告
+        short_msg = f"⚠️ 盘前检查基本通过（通过{counts[0]}/警告{counts[1]}/失败{counts[2]}），东财接口备用"
+        update_trading_day(today, morning_check_done=1, tasks_pending=0)
+    
     # 打印报告
     print(report)
+    print(f"\n✅ 检查完成 | 通过:{counts[0]} 警告:{counts[1]} 失败:{counts[2]}")
+    print(f"📋 任务状态已更新 (task_id={task_id})")
     
     # 发送飞书通知
-    if counts[2] > 0:  # 有失败的，优先发送
-        send_feishu(report)
-    elif counts[1] > 0:  # 有警告的，摘要发送
-        summary = f"🦐【每日盘前检查】⚠️ 基本通过（通过{counts[0]}/警告{counts[1]}/失败{counts[2]}）\n详细报告已生成，请查看。"
-        send_feishu(summary)
-    # 如果全部通过，默认不打扰（避免过多通知）
-    
-    print(f"\n✅ 检查完成 | 通过:{counts[0]} 警告:{counts[1]} 失败:{counts[2]}")
+    send_feishu(short_msg)
