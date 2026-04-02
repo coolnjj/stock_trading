@@ -195,9 +195,119 @@ python3 stock_trading.py [check|signal|review|brief|init|all]
   all    - 初始化+简报
 ```
 
-### 数据库
-- `trading_task.db` — 任务表/交易日追踪/执行日志/策略运行记录
-- `trading.db` — 持仓/交易记录/每日检查日志
+### 数据库架构
+
+#### trading_task.db — 任务追踪核心库
+
+**表1: tasks（任务表）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | 任务ID |
+| task_name | TEXT | 任务名称 |
+| task_type | TEXT | daily / one_time / recurring |
+| source | TEXT | 虾主 / system / strategy |
+| status | TEXT | pending / in_progress / completed / expired / cancelled |
+| priority | INTEGER | 1=最高 5=最低 |
+| created_at | TEXT | ISO创建时间 |
+| updated_at | TEXT | ISO更新时间 |
+| due_date | TEXT | 到期日期 |
+| completed_at | TEXT | 完成时间 |
+| completion_summary | TEXT | 完成总结 |
+| lessons_learned | TEXT | 经验教训（重要） |
+| related_strategy | TEXT | 关联策略 |
+| notes | TEXT | 备注 |
+| tags | TEXT | JSON标签数组 |
+
+**表2: trading_days（交易日追踪）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| trade_date | TEXT UNIQUE | 交易日日期 |
+| day_status | TEXT | open / closed |
+| total_pnl | REAL | 当日总盈亏 |
+| win_rate | REAL | 当日胜率 |
+| positions_opened | INTEGER | 新开仓数 |
+| positions_closed | INTEGER | 平仓数 |
+| tasks_planned | INTEGER | 计划任务数 |
+| tasks_completed | INTEGER | 已完成任务数 |
+| tasks_pending | INTEGER | 未完成任务数 |
+| summary_generated | INTEGER | 是否生成总结 |
+| morning_check_done | INTEGER | 盘前检查是否完成 |
+| signal_report_done | INTEGER | 信号报告是否完成 |
+| closing_review_done | INTEGER | 收盘复盘是否完成 |
+| created_at / updated_at | TEXT | 时间戳 |
+
+**表3: task_executions（任务执行日志）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| task_id | INTEGER FK | 关联任务ID |
+| execution_date | TEXT | 执行日期 |
+| action | TEXT | started / completed / failed / extended |
+| result | TEXT | 执行结果 |
+| notes | TEXT | 备注 |
+
+**表4: strategy_runs（四周期策略运行记录）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| stock_code | TEXT | 股票代码 |
+| strategy_type | TEXT | 3day / 12day / 26day / longterm |
+| run_date | TEXT | 运行日期 |
+| status | TEXT | running / completed / signal_triggered |
+| signal_type | TEXT | buy / sell / hold |
+| entry_price | REAL | 买入价 |
+| exit_price | REAL | 卖出价 |
+| pnl | REAL | 盈亏 |
+| notes | TEXT | 备注 |
+| created_at | TEXT | 创建时间 |
+
+---
+
+#### trading.db — 交易业务库
+
+**表1: positions（持仓表）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| date | TEXT | 日期 |
+| stock_code | TEXT | 股票代码 |
+| stock_name | TEXT | 股票名称 |
+| position_type | TEXT | 仓位类型（长期/一夜/龙头） |
+| shares | INTEGER | 持仓数量 |
+| avg_cost | REAL | 持仓均价 |
+| current_price | REAL | 当前价格 |
+| market_value | REAL | 市值 |
+| unrealized_pnl | REAL | 浮动盈亏 |
+| created_at | TEXT | 创建时间 |
+
+**表2: trades（交易记录表）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| date | TEXT | 交易日期 |
+| stock_code | TEXT | 股票代码 |
+| stock_name | TEXT | 股票名称 |
+| action | TEXT | buy / sell |
+| price | REAL | 成交价格 |
+| shares | INTEGER | 成交数量 |
+| amount | REAL | 成交金额 |
+| strategy_type | TEXT | 策略类型 |
+| signal_source | TEXT | 信号来源 |
+| created_at | TEXT | 创建时间 |
+
+**表3: daily_check（每日检查日志）**
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | INTEGER PRIMARY KEY | ID |
+| date | TEXT | 检查日期 |
+| check_time | TEXT | 检查时间 |
+| module | TEXT | 检查模块 |
+| status | TEXT | pass / warn / fail |
+| detail | TEXT | 详细结果 |
+| suggestion | TEXT | 建议 |
+
+---
 
 ### 每日自动化 cron 任务（统一入口）
 | 任务 | cron | 触发命令 |
