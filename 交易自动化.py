@@ -529,11 +529,73 @@ def daily_brief():
     return "\n".join(lines)
 
 # ========== 交易日判断 ==========
+# 2026年A股节假日休市安排（根据交易所公告）
+HOLIDAY_DATES_2026 = {
+    # 元旦
+    "2026-01-01", "2026-01-02", "2026-01-03",
+    # 春节
+    "2026-01-28", "2026-01-29", "2026-01-30", "2026-01-31",
+    "2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04",
+    # 清明节
+    "2026-04-03", "2026-04-04", "2026-04-05",
+    # 劳动节
+    "2026-05-01", "2026-05-02", "2026-05-03",
+    # 端午节
+    "2026-05-31", "2026-06-01", "2026-06-02",
+    # 中秋节
+    "2026-09-25", "2026-09-26", "2026-09-27",
+    # 国庆节
+    "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04",
+    "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08",
+}
+
+WORKING_WEEKEND_DATES_2026 = {
+    # 调休上班日（周末但开市）
+    "2026-02-07", "2026-02-08",  # 春节调休周六
+    "2026-04-06", "2026-05-04",  # 劳动节调休
+    "2026-10-10", "2026-10-11",  # 国庆节调休
+}
+
 def is_trading_day():
-    """判断今天是否为交易日（简单判断：周一到周五）"""
-    weekday = datetime.now().weekday()
-    # 0=周一, 4=周五, 5=周六, 6=周日
-    return weekday < 5
+    """判断今天是否为交易日（精确判断：周末+节假日+调休）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    weekday = datetime.now().weekday()  # 0=周一, 5=周六, 6=周日
+
+    # 1. 调休上班日（周末但开市）
+    if today in WORKING_WEEKEND_DATES_2026:
+        return True
+
+    # 2. 节假日（放假不开市）
+    if today in HOLIDAY_DATES_2026:
+        return False
+
+    # 3. 周末判断
+    if weekday >= 5:  # 周六/周日
+        return False
+
+    return True
+
+def get_next_trading_day():
+    """获取下一个交易日"""
+    d = datetime.now()
+    for i in range(1, 15):  # 最多往前/往后查15天
+        candidate = d + timedelta(days=i)
+        candidate_str = candidate.strftime("%Y-%m-%d")
+        weekday = candidate.weekday()
+        if weekday < 5 and candidate_str not in HOLIDAY_DATES_2026 and candidate_str not in WORKING_WEEKEND_DATES_2026:
+            return candidate_str
+    return None
+
+def get_prev_trading_day():
+    """获取上一个交易日"""
+    d = datetime.now()
+    for i in range(1, 15):
+        candidate = d - timedelta(days=i)
+        candidate_str = candidate.strftime("%Y-%m-%d")
+        weekday = candidate.weekday()
+        if weekday < 5 and candidate_str not in HOLIDAY_DATES_2026 and candidate_str not in WORKING_WEEKEND_DATES_2026:
+            return candidate_str
+    return None
 
 # ========== 系统优化（非交易日） ==========
 def run_optimization():
@@ -630,10 +692,10 @@ def run_optimization():
 
     # 5. 下个交易日预览
     lines.append("\n📋 下个交易日预览：")
-    next_day = datetime.now()
-    while next_day.weekday() >= 5:
-        next_day += timedelta(days=1)
-    lines.append(f"  下个交易日: {next_day.strftime('%Y-%m-%d %A')}")
+    next_day = get_next_trading_day()
+    prev_day = get_prev_trading_day()
+    lines.append(f"  上个交易日: {prev_day}")
+    lines.append(f"  下个交易日: {next_day}")
     lines.append("  届时自动执行: 盘前检查 → 交易信号 → 收盘复盘")
 
     report = "\n".join(lines)
