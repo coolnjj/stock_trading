@@ -102,18 +102,33 @@ def init_dbs():
         execution_date TEXT, action TEXT, result TEXT, notes TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS strategy_runs (id INTEGER PRIMARY KEY, stock_code TEXT,
         strategy_type TEXT, run_date TEXT, status TEXT, signal_type TEXT,
-        entry_price REAL, exit_price REAL, pnl REAL, notes TEXT, created_at TEXT)""")
+        entry_price REAL, exit_price REAL, pnl REAL, notes TEXT, created_at TEXT,
+        source TEXT DEFAULT 'paper')""")
+    try:
+        c.execute("ALTER TABLE strategy_runs ADD COLUMN source TEXT DEFAULT 'paper'")
+    except:
+        pass
     conn.commit()
     conn.close()
 
     conn2 = sqlite3.connect(TRADING_DAY_DB)
     c2 = conn2.cursor()
+    # positions: 持仓表，增加source区分模拟/实盘
     c2.execute("""CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY, date TEXT, stock_code TEXT,
         stock_name TEXT, position_type TEXT, shares INTEGER, avg_cost REAL, current_price REAL,
-        market_value REAL, unrealized_pnl REAL, created_at TEXT)""")
+        market_value REAL, unrealized_pnl REAL, created_at TEXT,
+        source TEXT DEFAULT 'paper')""")
     c2.execute("""CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY, date TEXT, stock_code TEXT,
         stock_name TEXT, action TEXT, price REAL, shares INTEGER, amount REAL,
-        strategy_type TEXT, signal_source TEXT, created_at TEXT)""")
+        strategy_type TEXT, signal_source TEXT, created_at TEXT,
+        source TEXT DEFAULT 'paper')""")
+    # 兼容已存在的旧表（没有source列）
+    try:
+        c2.execute("ALTER TABLE positions ADD COLUMN source TEXT DEFAULT 'paper'")
+        c2.execute("ALTER TABLE trades ADD COLUMN source TEXT DEFAULT 'paper'")
+    except Exception as e:
+        pass  # 列已存在或表不存在，忽略
+    # daily_check: 每日检查日志
     c2.execute("""CREATE TABLE IF NOT EXISTS daily_check (id INTEGER PRIMARY KEY, date TEXT,
         check_time TEXT, module TEXT, status TEXT, detail TEXT, suggestion TEXT)""")
     conn2.commit()
@@ -167,6 +182,83 @@ def update_trading_day(date, **kwargs):
         c.execute(f"UPDATE trading_days SET {k}=?, updated_at=? WHERE trade_date=?", (v, now, date))
     conn.commit()
     conn.close()
+
+# ========== 模拟交易记录 ==========
+TRADE_SOURCE = "paper"  # paper=模拟交易 live=实盘交易
+
+def record_paper_position(stock_code, stock_name, position_type, shares, avg_cost, current_price):
+    """记录模拟持仓"""
+    conn = sqlite3.connect(TRADING_DAY_DB)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    today = datetime.now().strftime("%Y-%m-%d")
+    market_value = shares * current_price
+    unrealized_pnl = market_value - (shares * avg_cost)
+
+    c.execute("""INSERT INTO positions (date, stock_code, stock_name, position_type, shares, avg_cost,
+        current_price, market_value, unrealized_pnl, created_at, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (today, stock_code, stock_name, position_type, shares, avg_cost,
+         current_price, market_value, unrealized_pnl, now, TRADE_SOURCE))
+    conn.commit()
+    conn.close()
+    log(f"📝 记录模拟持仓: {stock_name}({stock_code}) {shares}股 @{avg_cost}")
+
+def record_paper_trade(stock_code, stock_name, action, price, shares, strategy_type, signal_source, notes=""):
+    """记录模拟交易"""
+    conn = sqlite3.connect(TRADING_DAY_DB)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    today = datetime.now().strftime("%Y-%m-%d")
+    amount = price * shares
+
+    c.execute("""INSERT INTO trades (date, stock_code, stock_name, action, price, shares, amount,
+        strategy_type, signal_source, created_at, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (today, stock_code, stock_name, action, price, shares, amount,
+         strategy_type, signal_source, now, TRADE_SOURCE))
+    conn.commit()
+    conn.close()
+    log(f"📝 记录模拟交易: {stock_name}({stock_code}) {action} {shares}股 @{price}")
+
+def record_strategy_run(stock_code, strategy_type, signal_type, entry_price, notes=""):
+    """记录策略信号"""
+    conn = sqlite3.connect(TRADING_DB)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    c.execute("""INSERT INTO strategy_runs (stock_code, strategy_type, run_date, status, signal_type,
+        entry_price, notes, created_at, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (stock_code, strategy_type, today, "signal_triggered", signal_type,
+         entry_price, notes, now, TRADE_SOURCE))
+    conn.commit()
+    conn.close()
+    log(f"📝 记录策略信号: {stock_code} {strategy_type} {signal_type} @{entry_price}")
+
+def get_paper_trades_summary():
+    """获取模拟交易汇总（用于复盘对比）"""
+    conn = sqlite3.connect(TRADING_DAY_DB)
+    c = conn.cursor()
+
+    # 模拟交易统计
+    c.execute("""SELECT action, COUNT(*), SUM(amount), AVG(price) FROM trades
+        WHERE source='paper' GROUP BY action""")
+    trade_stats = {row[0]: {"count": row[1], "amount": row[2], "avg_price": row[3]} for row in c.fetchall()}
+
+    # 模拟持仓统计
+    c.execute("""SELECT position_type, COUNT(*), SUM(market_value), SUM(unrealized_pnl)
+        FROM positions WHERE source='paper' GROUP BY position_type""")
+    pos_stats = {row[0]: {"count": row[1], "market_value": row[2], "pnl": row[3]} for row in c.fetchall()}
+
+    # 近期模拟交易记录
+    c.execute("""SELECT date, stock_name, action, price, shares, amount, strategy_type
+        FROM trades WHERE source='paper' ORDER BY date DESC LIMIT 10""")
+    recent_trades = c.fetchall()
+
+    conn.close()
+    return {"trade_stats": trade_stats, "pos_stats": pos_stats, "recent_trades": recent_trades}
 
 def save_check_record(module, status, detail, suggestion=""):
     conn = sqlite3.connect(TRADING_DAY_DB)
@@ -420,7 +512,42 @@ def run_signal():
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write(f"# 模拟交易报告\n\n{report}\n")
 
-    complete_task(task_id, "交易信号报告已生成并推送", "交运RSI69.4偏高关注高抛机会")
+    # ========== 记录模拟交易数据 ==========
+    # 1. 记录长期持有仓位（今日建仓）
+    positions_data = {
+        "000582": {"name": "北部湾港", "cost": 10.65, "shares": 14000, "current": 10.65},
+        "600676": {"name": "交运股份", "cost": 7.60, "shares": 19700, "current": 7.60},
+    }
+    for code, pos in positions_data.items():
+        record_paper_position(
+            stock_code=code,
+            stock_name=pos["name"],
+            position_type="长期持有",
+            shares=pos["shares"],
+            avg_cost=pos["cost"],
+            current_price=pos["current"]
+        )
+        record_strategy_run(
+            stock_code=code,
+            strategy_type="长期持有",
+            signal_type="建仓",
+            entry_price=pos["cost"],
+            notes="模拟建仓"
+        )
+
+    # 2. 记录策略信号（一夜仓候选）
+    for code, name, industry in overnight_candidates:
+        q = quotes.get(code, {})
+        current = q.get("current", q.get("close", 30.51 if code == "300759" else 57.05))
+        record_strategy_run(
+            stock_code=code,
+            strategy_type="一夜持仓",
+            signal_type="观察",
+            entry_price=current,
+            notes=f"{industry}，等待尾盘确认"
+        )
+
+    complete_task(task_id, "交易信号报告已生成并推送", "交运RSI69.4偏高关注高抛机会；康龙化成候选一夜仓")
     update_trading_day(today, signal_report_done=1)
     send_feishu(report)
     log("交易信号报告已推送")

@@ -272,6 +272,7 @@ python3 交易自动化.py [check|signal|review|brief|init|all]
 | stock_code | TEXT | 股票代码 |
 | strategy_type | TEXT | 3day / 12day / 26day / longterm |
 | run_date | TEXT | 运行日期 |
+| source | TEXT | **paper=模拟交易 / live=实盘交易** |
 | status | TEXT | running / completed / signal_triggered |
 | signal_type | TEXT | buy / sell / hold |
 | entry_price | REAL | 买入价 |
