@@ -600,7 +600,11 @@ def get_prev_trading_day():
     return None
 
 # ========== 自检程序 ==========
-CHECK_INTERVAL = 30 * 60  # 30分钟检查一次
+CRITICAL_CHECK_INTERVAL = 5 * 60   # 交易接口/数据源：每5分钟检查
+OTHER_CHECK_INTERVAL = 30 * 60       # 其他模块：每30分钟检查
+
+# 降级持续告警阈值
+DEGRADED_ALERT_THRESHOLD = 60 * 60  # 降级状态持续1小时才告警
 
 HEALTH_STATES = {
     "healthy": "✅ 健康",
@@ -612,11 +616,28 @@ class HealthStatus:
     def __init__(self):
         self.modules = {}
         self.last_check = None
-        self.alerts_sent_today = set()
+        self.degraded_since = {}  # 记录每个模块进入降级状态的时间
+        self.alerts_sent = {}    # 记录每个模块最后告警时间
 
     def update(self, module, status, detail=""):
-        self.modules[module] = {"status": status, "detail": detail, "time": datetime.now().strftime("%H:%M")}
-        self.last_check = datetime.now()
+        now = datetime.now()
+        prev = self.modules.get(module, {}).get("status")
+
+        self.modules[module] = {
+            "status": status,
+            "detail": detail,
+            "time": now.strftime("%H:%M"),
+            "last_update": now
+        }
+        self.last_check = now
+
+        # 追踪降级持续时间
+        if status == "degraded":
+            if prev != "degraded":
+                self.degraded_since[module] = now
+        else:
+            if module in self.degraded_since:
+                del self.degraded_since[module]
 
     def get_overall(self):
         if any(m["status"] == "failed" for m in self.modules.values()):
@@ -625,22 +646,31 @@ class HealthStatus:
             return "degraded"
         return "healthy"
 
-    def should_alert(self, module):
-        """判断是否需要发送告警（同一模块故障1小时内不重复告警）"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        key = f"{today}_{module}"
-        if key in self.alerts_sent_today:
+    def should_alert_degraded(self, module):
+        """降级状态持续1小时才告警"""
+        if module not in self.degraded_since:
             return False
-        return True
+        elapsed = (datetime.now() - self.degraded_since[module]).total_seconds()
+        last_alert = self.alerts_sent.get(module, datetime.min)
+        # 1小时内只告警一次
+        if elapsed >= DEGRADED_ALERT_THRESHOLD:
+            if (datetime.now() - last_alert).total_seconds() >= 3600:
+                return True
+        return False
+
+    def should_alert_failed(self, module):
+        """故障立即告警"""
+        last_alert = self.alerts_sent.get(module, datetime.min)
+        # 故障告警：同一个模块10分钟内不重复
+        return (datetime.now() - last_alert).total_seconds() >= 600
 
     def mark_alerted(self, module):
-        today = datetime.now().strftime("%Y-%m-%d")
-        self.alerts_sent_today.add(f"{today}_{module}")
+        self.alerts_sent[module] = datetime.now()
 
 global_health = HealthStatus()
 
 def check_data_source():
-    """检查数据源可用性"""
+    """检查数据源可用性（关键模块，高频检查）"""
     results = {}
 
     # 新浪行情接口
@@ -661,15 +691,16 @@ def check_data_source():
     except Exception as e:
         results["sina_kline"] = "failed"
 
-    # 东方财富接口（备用）
+    # 东方财富接口（备用，关键模块）
     try:
         url3 = "http://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f43,f57,f58"
+        req3 = urllib.request.Request(url3)
         with urllib.request.urlopen(req3, timeout=5) as resp:
             results["em_quote"] = "healthy" if resp.status == 200 else "degraded"
     except Exception as e:
         results["em_quote"] = "degraded"  # 备用接口降级不算故障
 
-    # 数据新鲜度检查（获取到的行情是否是今日）
+    # 数据新鲜度检查（是否是今日数据）
     try:
         quotes = get_realtime_quotes(["000582"])
         if quotes.get("000582"):
@@ -687,7 +718,7 @@ def check_data_source():
     return results
 
 def check_qmt_interface():
-    """检查QMT接口状态"""
+    """检查QMT接口状态（关键模块，高频检查）"""
     # 模拟模式：QMT未部署返回降级状态
     return {"qmt": "degraded"}
 
@@ -741,42 +772,40 @@ def check_trading_day_status():
 
     return results
 
-def run_self_check():
+def run_self_check(critical_only=False):
     """执行自检，返回检查结果"""
-    log("🩺 执行自检...")
     check_results = {}
 
-    # 1. 数据源检查
+    # 1. 数据源检查（关键模块）
     data_results = check_data_source()
     for module, status in data_results.items():
-        check_results[f"data_{module}"] = status
+        check_results[f"数据源_{module}"] = status
         global_health.update(f"数据源_{module}", status, "")
 
-    # 2. QMT接口
+    # 2. QMT接口（关键模块）
     qmt_results = check_qmt_interface()
     for module, status in qmt_results.items():
-        check_results[f"qmt_{module}"] = status
+        check_results[f"QMT_{module}"] = status
         global_health.update(f"QMT_{module}", status, "")
 
-    # 3. 数据库
-    db_results = check_database_health()
-    for module, status in db_results.items():
-        check_results[f"db_{module}"] = status
-        global_health.update(f"数据库_{module}", status, "")
+    # 3. 数据库（非关键，每30分钟）
+    if not critical_only:
+        db_results = check_database_health()
+        for module, status in db_results.items():
+            check_results[f"数据库_{module}"] = status
+            global_health.update(f"数据库_{module}", status, "")
 
-    # 4. 当日交易状态
-    td_results = check_trading_day_status()
-    for module, status in td_results.items():
-        check_results[f"td_{module}"] = status
-        global_health.update(f"当日_{module}", status, "")
+        # 4. 当日交易状态（非关键）
+        td_results = check_trading_day_status()
+        for module, status in td_results.items():
+            check_results[f"当日_{module}"] = status
+            global_health.update(f"当日_{module}", status, "")
 
     # 汇总
     overall = global_health.get_overall()
     healthy_count = sum(1 for v in check_results.values() if v == "healthy")
     degraded_count = sum(1 for v in check_results.values() if v == "degraded")
     failed_count = sum(1 for v in check_results.values() if v == "failed")
-
-    log(f"🩺 自检完成: {healthy_count}✅ {degraded_count}⚠️ {failed_count}❌ 总体:{HEALTH_STATES[overall]}")
 
     return {
         "overall": overall,
@@ -787,8 +816,44 @@ def run_self_check():
         "time": datetime.now().strftime("%H:%M:%S")
     }
 
+def check_and_alert():
+    """执行检查并根据规则告警（通过不报告，降级1小时报告，故障立刻报告）"""
+    result = run_self_check()
+    overall = result["overall"]
+
+    alert_triggered = False
+    alert_lines = []
+
+    # 故障：立即告警
+    for module, info in global_health.modules.items():
+        if info["status"] == "failed":
+            if global_health.should_alert_failed(module):
+                alert_lines.append(f"🚨 【故障告警】{module}")
+                global_health.mark_alerted(module)
+                alert_triggered = True
+
+    # 降级：持续1小时才告警
+    for module, info in global_health.modules.items():
+        if info["status"] == "degraded":
+            if global_health.should_alert_degraded(module):
+                degraded_time = (datetime.now() - global_health.degraded_since[module]).total_seconds() / 60
+                alert_lines.append(f"⚠️ 【降级告警】{module}（已持续{degraded_time:.0f}分钟）")
+                global_health.mark_alerted(module)
+                alert_triggered = True
+
+    if alert_triggered:
+        summary = f"🦐【监控告警 {result['time']}】\n" + "\n".join(alert_lines)
+        summary += f"\n当前: {healthy_count}✅ {degraded_count}⚠️ {failed_count}❌"
+        log(summary)
+        send_feishu(summary)
+        return summary
+
+    # 正常：静默不报告
+    log(f"🩺 自检通过: {healthy_count}✅ {degraded_count}⚠️ {failed_count}❌")
+    return None
+
 def self_check_report():
-    """生成自检报告"""
+    """生成自检报告（手动查看用）"""
     result = run_self_check()
     overall = result["overall"]
 
@@ -805,50 +870,39 @@ def self_check_report():
         if modules:
             lines.append(f"\n{label}（{len(modules)}项）:")
             for m in modules:
-                display_name = m.replace("data_", "").replace("qmt_", "").replace("db_", "").replace("td_", "")
-                lines.append(f"  ✓ {display_name}")
+                lines.append(f"  ✓ {m}")
 
-    # 需要告警的故障模块
-    failed_modules = [k for k, v in result["details"].items() if v == "failed"]
-    if failed_modules and overall == "failed":
-        lines.append(f"\n🚨 故障告警:")
-        for m in failed_modules:
-            if global_health.should_alert(m):
-                lines.append(f"  → {m} 需要处理")
-                global_health.mark_alerted(m)
+    # 显示降级持续时间
+    if global_health.degraded_since:
+        lines.append(f"\n降级持续时间:")
+        for module, start_time in global_health.degraded_since.items():
+            elapsed = (datetime.now() - start_time).total_seconds() / 60
+            lines.append(f"  {module}: {elapsed:.0f}分钟")
 
-    lines.append(f"\n下次检查: 30分钟后")
     return "\n".join(lines)
 
-def run_monitor_loop(interval=CHECK_INTERVAL, duration=None):
+def run_monitor_loop(duration=None):
     """
     持续监控循环
-    - 每interval秒执行一次自检
-    - duration=None表示持续运行，duration=秒数表示运行多久后退出
+    - 关键模块（数据源/交易接口）：每5分钟检查
+    - 非关键模块：每30分钟检查
     """
-    log(f"🩺 启动自检监控，每{interval//60}分钟检查一次")
+    log(f"🩺 启动自检监控（关键模块每5分钟，非关键每30分钟）")
     start_time = time.time()
+    last_other_check = 0
 
     while True:
         try:
-            report = self_check_report()
-            overall = global_health.get_overall()
+            # 关键模块：每次都检查
+            run_self_check(critical_only=True)
+            # 检查是否需要告警
+            check_and_alert()
 
-            # 故障/降级时发送告警
-            if overall in ["failed", "degraded"]:
-                print(report)
-                failed = [k for k, v in global_health.modules.items()
-                         if v["status"] in ["failed", "degraded"]]
-                if failed:
-                    alert_msg = f"⚠️ 【监控告警】{datetime.now().strftime('%H:%M')}\n"
-                    alert_msg += f"异常模块: {', '.join(failed)}\n"
-                    alert_msg += f"总体状态: {HEALTH_STATES[overall]}\n"
-                    alert_msg += f"请检查系统"
-                    send_feishu(alert_msg)
-
-            # 正常时静默（避免过多通知）
-            # 只有明确要求才打印
-            # print(report)
+            # 非关键模块：每30分钟检查一次
+            elapsed = time.time() - start_time
+            if elapsed - last_other_check >= OTHER_CHECK_INTERVAL:
+                run_self_check(critical_only=False)
+                last_other_check = elapsed
 
         except Exception as e:
             log(f"⚠️ 自检异常: {e}")
@@ -858,7 +912,7 @@ def run_monitor_loop(interval=CHECK_INTERVAL, duration=None):
             log(f"🩺 监控结束（已运行{duration//60}分钟）")
             break
 
-        time.sleep(interval)
+        time.sleep(CRITICAL_CHECK_INTERVAL)
 
 def run_with_monitoring(target_func, *args, **kwargs):
     """包装函数：在后台启动监控，主线程执行目标函数"""
@@ -868,11 +922,11 @@ def run_with_monitoring(target_func, *args, **kwargs):
     try:
         result = target_func(*args, **kwargs)
         log("✅ 主任务完成，监控继续...")
-        # 主任务完成后，监控继续运行一段时间后退出
-        time.sleep(300)  # 再监控5分钟
+        time.sleep(300)  # 主任务完成后，监控继续运行5分钟
     except Exception as e:
         log(f"❌ 主任务异常: {e}")
         raise
+
 def run_optimization():
     """非交易日执行：系统优化 + 交易复盘"""
     today = datetime.now().strftime("%Y-%m-%d")
