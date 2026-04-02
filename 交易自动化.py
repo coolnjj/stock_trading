@@ -934,31 +934,26 @@ def stop_monitor():
     except:
         pass
 
-def run_with_monitoring(target_func, *args, **kwargs):
-    """包装函数：用nohup启动独立监控进程，主线程执行目标函数"""
-    # 先用nohup启动独立monitor进程
+def start_monitor_bg():
+    """启动独立monitor后台进程"""
     monitor_script = f"{WORKSPACE}/交易自动化.py"
     log_file = f"{WORKSPACE}/monitor.log"
     pid_file = f"{WORKSPACE}/monitor.pid"
-
-    # 启动monitor进程（nohup后台运行，-u不缓冲）
+    stop_monitor()
     cmd = f"nohup python3 -u '{monitor_script}' monitor >> '{log_file}' 2>&1 &"
-    result = subprocess.run(cmd, shell=True, capture_output=True)
-    log(f"🚀 启动monitor后台进程: {result.returncode == 0}")
-
-    # 写入PID文件，方便管理
+    subprocess.run(cmd, shell=True)
+    import time
+    time.sleep(1)
     try:
-        with open(pid_file, "w") as f:
-            f.write(str(subprocess.run("echo $!", shell=True, capture_output=True).stdout.decode().strip()))
+        r = subprocess.run("ps aux | grep '交易自动化.py monitor' | grep -v grep | awk '{print $2}' | head -1",
+                          shell=True, capture_output=True)
+        pid = r.stdout.decode().strip()
+        if pid:
+            with open(pid_file, "w") as f:
+                f.write(pid)
+            log(f"🚀 Monitor已启动 (PID: {pid})")
     except:
         pass
-
-    try:
-        result = target_func(*args, **kwargs)
-        log("✅ 主任务完成")
-    except Exception as e:
-        log(f"❌ 主任务异常: {e}")
-        raise
 
 def run_optimization():
     """非交易日执行：系统优化 + 交易复盘"""
@@ -1069,6 +1064,10 @@ def run_optimization():
 if __name__ == "__main__":
     mode = sys.argv[1].lower() if len(sys.argv) > 1 else "auto"
 
+    # 除了stop/monitor外的所有模式，自动启动后台monitor
+    if mode not in ("stop", "monitor"):
+        start_monitor_bg()
+
     if mode == "check":
         run_check()
     elif mode == "signal":
@@ -1085,46 +1084,40 @@ if __name__ == "__main__":
     elif mode == "optimize":
         run_optimization()
     elif mode == "auto":
-        # 自动判断模式：cron 触发后自动判断
         init_dbs()
-        # 先停止旧的monitor
-        stop_monitor()
         if is_trading_day():
             log("今日为交易日，执行完整流程")
             generate_daily_tasks()
-            run_with_monitoring(lambda: (run_check(), run_signal(), run_review()))
+            run_check()
+            run_signal()
+            run_review()
         else:
             log("今日为非交易日，执行系统优化")
-            run_with_monitoring(run_optimization)
-
+            run_optimization()
     elif mode == "stop":
         stop_monitor()
-
+        print("🛑 Monitor已停止")
     elif mode == "selfcheck":
-        # 立即执行一次自检
         print(self_check_report())
-        send_feishu(self_check_report())
-
     elif mode == "monitor":
-        # 持续监控模式（不退出）
         run_monitor_loop()
-
     elif mode == "all":
         init_dbs()
         generate_daily_tasks()
         print("📋 今日任务已生成：")
         print(daily_brief())
         send_feishu(daily_brief())
-
     else:
-        print(f"用法: python3 交易自动化.py [check|signal|review|brief|init|auto|selfcheck|monitor|all]")
-        print(f"  check     - 盘前检查（交易日）")
+        print(f"用法: python3 交易自动化.py [check|signal|review|brief|init|auto|selfcheck|monitor|stop|all]")
+        print(f"  check     - 盘前检查")
         print(f"  signal    - 交易信号报告")
         print(f"  review    - 收盘复盘")
         print(f"  brief     - 每日简报")
         print(f"  init      - 初始化数据库和任务")
         print(f"  optimize  - 系统优化（非交易日）")
         print(f"  selfcheck - 立即执行一次自检")
-        print(f"  monitor   - 持续自检监控（每30分钟，不退出）")
+        print(f"  monitor   - 持续自检监控（不退出）")
         print(f"  auto      - 自动判断（默认，cron触发时用）")
+        print(f"  stop      - 停止后台monitor")
         print(f"  all       - 初始化+简报")
+        print(f"\n⚠️ 除stop/monitor外，所有模式启动时自动开启后台monitor")
