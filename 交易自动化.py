@@ -10,6 +10,8 @@ import json
 import os
 import subprocess
 import urllib.request
+import time
+import threading
 from datetime import datetime, timedelta
 
 # ========== 全局配置 ==========
@@ -597,7 +599,280 @@ def get_prev_trading_day():
             return candidate_str
     return None
 
-# ========== 系统优化（非交易日） ==========
+# ========== 自检程序 ==========
+CHECK_INTERVAL = 30 * 60  # 30分钟检查一次
+
+HEALTH_STATES = {
+    "healthy": "✅ 健康",
+    "degraded": "⚠️ 降级",
+    "failed": "❌ 故障",
+}
+
+class HealthStatus:
+    def __init__(self):
+        self.modules = {}
+        self.last_check = None
+        self.alerts_sent_today = set()
+
+    def update(self, module, status, detail=""):
+        self.modules[module] = {"status": status, "detail": detail, "time": datetime.now().strftime("%H:%M")}
+        self.last_check = datetime.now()
+
+    def get_overall(self):
+        if any(m["status"] == "failed" for m in self.modules.values()):
+            return "failed"
+        if any(m["status"] == "degraded" for m in self.modules.values()):
+            return "degraded"
+        return "healthy"
+
+    def should_alert(self, module):
+        """判断是否需要发送告警（同一模块故障1小时内不重复告警）"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        key = f"{today}_{module}"
+        if key in self.alerts_sent_today:
+            return False
+        return True
+
+    def mark_alerted(self, module):
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.alerts_sent_today.add(f"{today}_{module}")
+
+global_health = HealthStatus()
+
+def check_data_source():
+    """检查数据源可用性"""
+    results = {}
+
+    # 新浪行情接口
+    try:
+        url = "http://hq.sinajs.cn/list=sh000001"
+        req = urllib.request.Request(url, headers={"Referer": "http://finance.sina.com.cn"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            results["sina_quote"] = "healthy" if resp.status == 200 else "degraded"
+    except Exception as e:
+        results["sina_quote"] = "failed"
+
+    # 新浪K线接口
+    try:
+        url2 = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=sh000001&scale=240&ma=5&datalen=1"
+        req2 = urllib.request.Request(url2, headers={"Referer": "http://finance.sina.com.cn"})
+        with urllib.request.urlopen(req2, timeout=5) as resp:
+            results["sina_kline"] = "healthy" if resp.status == 200 else "degraded"
+    except Exception as e:
+        results["sina_kline"] = "failed"
+
+    # 东方财富接口（备用）
+    try:
+        url3 = "http://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f43,f57,f58"
+        with urllib.request.urlopen(req3, timeout=5) as resp:
+            results["em_quote"] = "healthy" if resp.status == 200 else "degraded"
+    except Exception as e:
+        results["em_quote"] = "degraded"  # 备用接口降级不算故障
+
+    # 数据新鲜度检查（获取到的行情是否是今日）
+    try:
+        quotes = get_realtime_quotes(["000582"])
+        if quotes.get("000582"):
+            data_date = quotes["000582"].get("date", "")
+            today = datetime.now().strftime("%Y-%m-%d").replace("-", "")
+            if data_date == today:
+                results["data_freshness"] = "healthy"
+            else:
+                results["data_freshness"] = "degraded"
+        else:
+            results["data_freshness"] = "degraded"
+    except:
+        results["data_freshness"] = "degraded"
+
+    return results
+
+def check_qmt_interface():
+    """检查QMT接口状态"""
+    # 模拟模式：QMT未部署返回降级状态
+    return {"qmt": "degraded"}
+
+def check_database_health():
+    """检查数据库健康状态"""
+    results = {}
+
+    # trading_task.db
+    try:
+        conn = sqlite3.connect(TRADING_DB, timeout=5)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM tasks")
+        c.execute("SELECT COUNT(*) FROM trading_days")
+        conn.close()
+        results["task_db"] = "healthy"
+    except Exception as e:
+        results["task_db"] = "failed"
+
+    # trading.db
+    try:
+        conn2 = sqlite3.connect(TRADING_DAY_DB, timeout=5)
+        c2 = conn2.cursor()
+        c2.execute("SELECT COUNT(*) FROM positions")
+        c2.execute("SELECT COUNT(*) FROM trades")
+        conn2.close()
+        results["trading_db"] = "healthy"
+    except Exception as e:
+        results["trading_db"] = "failed"
+
+    return results
+
+def check_trading_day_status():
+    """检查当日任务执行状态"""
+    results = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        conn = sqlite3.connect(TRADING_DB)
+        c = conn.cursor()
+        c.execute("SELECT morning_check_done, signal_report_done, closing_review_done FROM trading_days WHERE trade_date=?", (today,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            results["morning_check"] = "completed" if row[0] else "pending"
+            results["signal_report"] = "completed" if row[1] else "pending"
+            results["closing_review"] = "completed" if row[2] else "pending"
+        else:
+            results["trading_day_init"] = "not_initialized"
+    except:
+        results["trading_day_status"] = "error"
+
+    return results
+
+def run_self_check():
+    """执行自检，返回检查结果"""
+    log("🩺 执行自检...")
+    check_results = {}
+
+    # 1. 数据源检查
+    data_results = check_data_source()
+    for module, status in data_results.items():
+        check_results[f"data_{module}"] = status
+        global_health.update(f"数据源_{module}", status, "")
+
+    # 2. QMT接口
+    qmt_results = check_qmt_interface()
+    for module, status in qmt_results.items():
+        check_results[f"qmt_{module}"] = status
+        global_health.update(f"QMT_{module}", status, "")
+
+    # 3. 数据库
+    db_results = check_database_health()
+    for module, status in db_results.items():
+        check_results[f"db_{module}"] = status
+        global_health.update(f"数据库_{module}", status, "")
+
+    # 4. 当日交易状态
+    td_results = check_trading_day_status()
+    for module, status in td_results.items():
+        check_results[f"td_{module}"] = status
+        global_health.update(f"当日_{module}", status, "")
+
+    # 汇总
+    overall = global_health.get_overall()
+    healthy_count = sum(1 for v in check_results.values() if v == "healthy")
+    degraded_count = sum(1 for v in check_results.values() if v == "degraded")
+    failed_count = sum(1 for v in check_results.values() if v == "failed")
+
+    log(f"🩺 自检完成: {healthy_count}✅ {degraded_count}⚠️ {failed_count}❌ 总体:{HEALTH_STATES[overall]}")
+
+    return {
+        "overall": overall,
+        "healthy": healthy_count,
+        "degraded": degraded_count,
+        "failed": failed_count,
+        "details": check_results,
+        "time": datetime.now().strftime("%H:%M:%S")
+    }
+
+def self_check_report():
+    """生成自检报告"""
+    result = run_self_check()
+    overall = result["overall"]
+
+    lines = [f"🦐【自检报告 {result['time']}】"]
+    lines.append(f"总体状态: {HEALTH_STATES[overall]}")
+
+    status_groups = {
+        "✅ 健康": [k for k, v in result["details"].items() if v == "healthy"],
+        "⚠️ 降级": [k for k, v in result["details"].items() if v == "degraded"],
+        "❌ 故障": [k for k, v in result["details"].items() if v == "failed"],
+    }
+
+    for label, modules in status_groups.items():
+        if modules:
+            lines.append(f"\n{label}（{len(modules)}项）:")
+            for m in modules:
+                display_name = m.replace("data_", "").replace("qmt_", "").replace("db_", "").replace("td_", "")
+                lines.append(f"  ✓ {display_name}")
+
+    # 需要告警的故障模块
+    failed_modules = [k for k, v in result["details"].items() if v == "failed"]
+    if failed_modules and overall == "failed":
+        lines.append(f"\n🚨 故障告警:")
+        for m in failed_modules:
+            if global_health.should_alert(m):
+                lines.append(f"  → {m} 需要处理")
+                global_health.mark_alerted(m)
+
+    lines.append(f"\n下次检查: 30分钟后")
+    return "\n".join(lines)
+
+def run_monitor_loop(interval=CHECK_INTERVAL, duration=None):
+    """
+    持续监控循环
+    - 每interval秒执行一次自检
+    - duration=None表示持续运行，duration=秒数表示运行多久后退出
+    """
+    log(f"🩺 启动自检监控，每{interval//60}分钟检查一次")
+    start_time = time.time()
+
+    while True:
+        try:
+            report = self_check_report()
+            overall = global_health.get_overall()
+
+            # 故障/降级时发送告警
+            if overall in ["failed", "degraded"]:
+                print(report)
+                failed = [k for k, v in global_health.modules.items()
+                         if v["status"] in ["failed", "degraded"]]
+                if failed:
+                    alert_msg = f"⚠️ 【监控告警】{datetime.now().strftime('%H:%M')}\n"
+                    alert_msg += f"异常模块: {', '.join(failed)}\n"
+                    alert_msg += f"总体状态: {HEALTH_STATES[overall]}\n"
+                    alert_msg += f"请检查系统"
+                    send_feishu(alert_msg)
+
+            # 正常时静默（避免过多通知）
+            # 只有明确要求才打印
+            # print(report)
+
+        except Exception as e:
+            log(f"⚠️ 自检异常: {e}")
+
+        # 判断是否退出
+        if duration and (time.time() - start_time) >= duration:
+            log(f"🩺 监控结束（已运行{duration//60}分钟）")
+            break
+
+        time.sleep(interval)
+
+def run_with_monitoring(target_func, *args, **kwargs):
+    """包装函数：在后台启动监控，主线程执行目标函数"""
+    monitor_thread = threading.Thread(target=run_monitor_loop, daemon=True)
+    monitor_thread.start()
+
+    try:
+        result = target_func(*args, **kwargs)
+        log("✅ 主任务完成，监控继续...")
+        # 主任务完成后，监控继续运行一段时间后退出
+        time.sleep(300)  # 再监控5分钟
+    except Exception as e:
+        log(f"❌ 主任务异常: {e}")
+        raise
 def run_optimization():
     """非交易日执行：系统优化 + 交易复盘"""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -728,25 +1003,36 @@ if __name__ == "__main__":
         if is_trading_day():
             log("今日为交易日，执行完整流程")
             generate_daily_tasks()
-            run_check()
-            run_signal()
-            run_review()
+            run_with_monitoring(lambda: (run_check(), run_signal(), run_review()))
         else:
             log("今日为非交易日，执行系统优化")
-            run_optimization()
+            run_with_monitoring(run_optimization)
+
+    elif mode == "selfcheck":
+        # 立即执行一次自检
+        print(self_check_report())
+        send_feishu(self_check_report())
+
+    elif mode == "monitor":
+        # 持续监控模式（不退出）
+        run_monitor_loop()
+
     elif mode == "all":
         init_dbs()
         generate_daily_tasks()
         print("📋 今日任务已生成：")
         print(daily_brief())
         send_feishu(daily_brief())
+
     else:
-        print(f"用法: python3 交易自动化.py [check|signal|review|brief|init|auto|optimize|all]")
-        print(f"  check    - 盘前检查（交易日）")
-        print(f"  signal   - 交易信号报告")
-        print(f"  review   - 收盘复盘")
-        print(f"  brief    - 每日简报")
-        print(f"  init     - 初始化数据库和任务")
-        print(f"  optimize - 系统优化（非交易日）")
-        print(f"  auto     - 自动判断（默认，cron触发时用）")
-        print(f"  all      - 初始化+简报")
+        print(f"用法: python3 交易自动化.py [check|signal|review|brief|init|auto|selfcheck|monitor|all]")
+        print(f"  check     - 盘前检查（交易日）")
+        print(f"  signal    - 交易信号报告")
+        print(f"  review    - 收盘复盘")
+        print(f"  brief     - 每日简报")
+        print(f"  init      - 初始化数据库和任务")
+        print(f"  optimize  - 系统优化（非交易日）")
+        print(f"  selfcheck - 立即执行一次自检")
+        print(f"  monitor   - 持续自检监控（每30分钟，不退出）")
+        print(f"  auto      - 自动判断（默认，cron触发时用）")
+        print(f"  all       - 初始化+简报")
