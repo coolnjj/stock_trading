@@ -183,10 +183,10 @@
 
 ## 任务追踪系统
 
-### 统一入口：stock_trading.py
+### 统一入口：交易自动化.py
 所有股票交易功能通过单一入口调用：
 ```bash
-python3 stock_trading.py [check|signal|review|brief|init|all]
+python3 交易自动化.py [check|signal|review|brief|init|all]
   check  - 盘前检查（6模块）
   signal - 交易信号报告（14:30）
   review - 收盘复盘（15:05）
@@ -312,9 +312,9 @@ python3 stock_trading.py [check|signal|review|brief|init|all]
 ### 每日自动化 cron 任务（统一入口）
 | 任务 | cron | 触发命令 |
 |------|------|---------|
-| 每日盘前检查 | 09:15 | `python3 stock_trading.py check` |
-| 每日交易信号报告 | 14:30 | `python3 stock_trading.py signal` |
-| 每日收盘复盘 | 15:05 | `python3 stock_trading.py review` |
+| 每日盘前检查 | 09:15 | `python3 交易自动化.py check` |
+| 每日交易信号报告 | 14:30 | `python3 交易自动化.py signal` |
+| 每日收盘复盘 | 15:05 | `python3 交易自动化.py review` |
 
 ### 虾主布置任务
 > 暂无（虾主可通过聊天布置任务，系统自动注册追踪）
