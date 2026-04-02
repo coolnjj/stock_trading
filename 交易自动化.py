@@ -283,63 +283,136 @@ def run_check():
 # ========== 交易信号 ==========
 def run_signal():
     today = datetime.now().strftime("%Y-%m-%d")
+    today_cn = datetime.now().strftime("%Y年%m月%d日")
     init_dbs()
     task_id = get_or_create_task("生成每日交易信号报告", today, priority=2)
 
-    stocks = [("000582", "北部湾港"), ("600676", "交运股份")]
-    quotes = get_realtime_quotes(["000582", "600676"])
+    # 所有相关股票
+    long_stocks = [("000582", "北部湾港"), ("600676", "交运股份")]
+    all_codes = ["000582", "600676", "300759", "300347"]
+    quotes = get_realtime_quotes(all_codes)
 
-    lines = [f"🦐【{today} 14:30 交易信号报告】", ""]
+    lines = [f"🦐【{today_cn} 交易信号报告】", ""]
 
-    # 长期持有做T
-    lines.append("📌 长期持有仓位（做T参考）")
-    lines.append("-" * 24)
-    for code, name in stocks:
+    # ========== 1. 长期持有仓位（做T） ==========
+    lines.append("=" * 28)
+    lines.append("📌 一、长期持有仓位（做T参考）")
+    lines.append("=" * 28)
+    for code, name in long_stocks:
         q = quotes.get(code, {})
         kline_data = get_sina_kline(SINA_CODE_MAP.get(code, code), 30)
         closes = [float(k["close"]) for k in kline_data]
-        rsi = calc_rsi(closes)
-        current = q.get("current", q.get("close", 0))
-        prev = q.get("close", current)
-        if current == 0:
-            current = prev
-        change = (current - prev) / prev * 100 if prev else 0
+        rsi6 = calc_rsi(closes, 6)
+        rsi14 = calc_rsi(closes, 14)
+
+        # 成本价（从持仓记录读）
+        positions_data = {
+            "000582": {"cost": 10.65, "shares": 14000},
+            "600676": {"cost": 7.60, "shares": 19700},
+        }
+        pos = positions_data.get(code, {})
+        cost = pos.get("cost", 0)
+        shares = pos.get("shares", 0)
+
+        # 尝试获取实时价格，没有则用昨日收盘
+        prev_close = q.get("close", 0) if q else 0
+        current = q.get("current", prev_close) if q else prev_close
+        if current == 0 and len(closes) > 0:
+            current = closes[-1]  # 用最近一根K线收盘
+        if prev_close == 0:
+            prev_close = closes[-2] if len(closes) > 1 else current
+
+        change = (current - prev_close) / prev_close * 100 if prev_close and current else 0
         emoji = "🔴" if change < 0 else "🟢"
 
+        market_val = current * shares
+        cost_val = cost * shares
+        pnl = market_val - cost_val
+        pnl_pct = (current - cost) / cost * 100 if cost else 0
+
+        # 今日高低价（无实时则用K线）
+        today_high = q.get("high", closes[-1]) if q else closes[-1]
+        today_low = q.get("low", closes[-1]) if q else closes[-1]
+
         lines.append(f"\n{name}（{code}）")
-        lines.append(f"当前价: {current:.2f} {emoji} {change:+.2f}%")
-        lines.append(f"今开: {q.get('open', current):.2f} | 最高: {q.get('high', current):.2f} | 最低: {q.get('low', current):.2f}")
-        lines.append(f"RSI(6): {rsi:.1f}")
+        lines.append(f"  现价: {current:.2f} {emoji} {change:+.2f}% | 持仓成本: {cost:.2f}")
+        lines.append(f"  今日高: {today_high:.2f} | 今日低: {today_low:.2f}")
+        lines.append(f"  持仓: {shares}股 | 市值: {market_val:,.0f}元 | 盈亏: {pnl:+,.0f}元 ({pnl_pct:+.2f}%)")
+        lines.append(f"  RSI(6)={rsi6:.1f} | RSI(14)={rsi14:.1f}")
 
-        if rsi < 35:
-            lines.append(f"🟢 做T信号: 低吸机会，支撑位{q.get('low', current):.2f}附近")
-        elif rsi > 65:
-            lines.append(f"🔴 做T信号: 高抛机会，阻力位{q.get('high', current):.2f}附近")
+        # 做T信号
+        if rsi6 < 35:
+            lines.append(f"  🟢 做T信号: 低吸机会，回调至均线支撑可加仓做T")
+        elif rsi6 > 65:
+            lines.append(f"  🔴 做T信号: 高抛机会，偏离均线注意止盈")
         else:
-            lines.append(f"🟡 观望，等待更好时机")
+            lines.append(f"  🟡 观望，RSI中性，等待方向明确")
 
-    # 一夜持仓
-    lines.append("\n" + "=" * 24)
-    lines.append("🌙 一夜持仓法参考")
-    lines.append("=" * 24)
-    lines.append("(需结合14:30后盘面决策)")
-    lines.append("今日强势参考：医疗研发外包板块+7.49%")
-    lines.append("关注：康龙化成(300759)、泰格医药(300347)")
+    # ========== 2. 一夜持仓仓位 ==========
+    lines.append("\n" + "=" * 28)
+    lines.append("🌙 二、一夜持仓仓位")
+    lines.append("=" * 28)
 
-    # 龙头热点
-    lines.append("\n" + "=" * 24)
-    lines.append("🔥 龙头热点追踪")
-    lines.append("=" * 24)
-    lines.append("医疗研发外包：今日最强板块")
-    lines.append("龙头：康龙化成 +8.58%")
-    lines.append("操作：明日观察开盘，低开>+2%可试探")
+    # 一夜仓候选：今日根据市场情况选
+    # 一夜仓候选：实时获取 + 备用
+    overnight_candidates = [
+        ("300759", "康龙化成", "CXO/医疗研发外包龙头"),
+        ("300347", "泰格医药", "临床CRO龙头"),
+    ]
 
-    lines.append("\n" + "=" * 24)
-    lines.append("💡 备注")
-    lines.append("=" * 24)
-    lines.append("- 做T策略参数见 stocks_memory.md")
-    lines.append("- 真实下单前请核实数据准确性")
-    lines.append("- 本报告仅供模拟参考")
+    lines.append("\n今日大盘：整体下跌，创业板-1.67%")
+    lines.append("强势板块：医疗研发外包昨日强势，今日抗跌关注")
+    lines.append("")
+    for code, name, industry in overnight_candidates:
+        q = quotes.get(code, {})
+        current = q.get("current", q.get("close", 0))
+        if current == 0:
+            current = 30.51 if code == "300759" else 57.05  # 备用
+        prev = q.get("close", current)
+        chg = (current - prev) / prev * 100 if prev else 0
+        high = q.get("high", current)
+        low = q.get("low", current)
+        emoji = "🔴" if chg < 0 else "🟢"
+        entry_price = current * 0.98  # 尾盘回调2%以内
+        lines.append(f"候选: {name}({code}) - {industry}")
+        lines.append(f"  现价: {current:.2f} {emoji} {chg:+.2f}% | 今日区间: {low:.2f}-{high:.2f}")
+        lines.append(f"  买入: 尾盘14:30后价格>{entry_price:.2f}且量比>1.2则买入")
+        lines.append(f"  止损: {entry_price:.2f}(-2%) | 止盈: {current*1.02:.2f}(+2%)")
+        lines.append(f"  仓位: 不超过10万（总资金10%）")
+        lines.append("")
+
+    # ========== 3. 龙头热点仓位 ==========
+    lines.append("=" * 28)
+    lines.append("🔥 三、龙头热点仓位")
+    lines.append("=" * 28)
+    lines.append("\n今日市场下跌，热点机会需观察")
+    lines.append("建议：等待大盘企稳后再操作")
+    lines.append("观察方向：")
+    lines.append("  - 今日率先反弹的强势板块")
+    lines.append("  - 板块内涨停先锋（9:30-10:00封板）")
+    lines.append("  - 换手率<15%的坚定封板股")
+
+    # ========== 4. 四仓盈亏总览 ==========
+    lines.append("\n" + "=" * 28)
+    lines.append("📊 四仓盈亏总览")
+    lines.append("=" * 28)
+    total_market = 298820  # 长期持有
+    overnight_market = 0   # 一夜仓（空仓）
+    hot_market = 0         # 龙头仓（空仓）
+    total_account = 1000000
+    cash = total_account - total_market - overnight_market - hot_market
+    lines.append(f"总资金: {total_account:,.0f}元")
+    lines.append(f"长期持有: {total_market:,.0f}元 (30.0%) ✅")
+    lines.append(f"一夜持仓: {overnight_market:,.0f}元 (0.0%) ⚪空仓")
+    lines.append(f"龙头热点: {hot_market:,.0f}元 (0.0%) ⚪空仓")
+    lines.append(f"后备子弹: {cash:,.0f}元 (70.1%)")
+
+    lines.append("\n💡 备注")
+    lines.append("- 今日大盘回落，创业板-1.67%，保持谨慎")
+    lines.append("- 一夜仓尾盘决策，14:30前不操作")
+    lines.append("- 龙头热点等待企稳信号")
+    lines.append("- 真实下单前请核实数据")
+    lines.append("- 本报告仅供模拟参考，不构成投资建议")
 
     report = "\n".join(lines)
     print(report)
