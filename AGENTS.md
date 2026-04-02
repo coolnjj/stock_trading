@@ -14,6 +14,7 @@ Before doing anything else:
 2. Read `USER.md` — this is who you're helping
 3. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
 4. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
+5. **If stock trading context is needed**: Read `stocks_memory.md` — 独立的股票记忆库，**禁止与其他记忆混淆**
 
 Don't ask permission. Just do it.
 
