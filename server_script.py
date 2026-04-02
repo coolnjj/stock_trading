@@ -65,8 +65,16 @@ def selfcheck():
     except:
         print("[FAIL] trading.db")
 
+def monitor_loop():
+    print("[Monitor] Started - checking every 5 minutes")
+    while True:
+        selfcheck()
+        time.sleep(300)
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "selfcheck":
         selfcheck()
+    elif len(sys.argv) > 1 and sys.argv[1] == "monitor":
+        monitor_loop()
     else:
-        print("Usage: python server_script.py selfcheck")
+        print("Usage: python server_script.py [selfcheck|monitor]")
