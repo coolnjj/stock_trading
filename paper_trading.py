@@ -217,11 +217,18 @@ def calc_rsi(prices, period=6):
 
 # ========== 发送飞书消息 ==========
 def send_feishu(target, message):
-    """通过openclaw CLI发送飞书消息"""
-    result = subprocess.run(
-        ["openclaw", "message", "send", "--channel", "feishu", "--target", target, "--message", message],
-        capture_output=True, text=True
-    )
+    """通过openclaw发送飞书消息（兼容Windows）"""
+    import platform
+    if platform.system() == "Windows":
+        # Windows上使用PowerShell运行openclaw
+        openclaw_cmd = "C:\\Users\\Administrator\\AppData\\Roaming\\npm\\openclaw.ps1"
+        cmd = f'powershell.exe -Command "& \'{openclaw_cmd}\' message send --channel feishu --target {target} --message \'{message}\'"'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    else:
+        result = subprocess.run(
+            ["openclaw", "message", "send", "--channel", "feishu", "--target", target, "--message", message],
+            capture_output=True, text=True
+        )
     return {"code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 # ========== 主报告生成 ==========
