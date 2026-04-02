@@ -15,7 +15,7 @@ import threading
 from datetime import datetime, timedelta
 
 # ========== 全局配置 ==========
-WORKSPACE = "/home/wenkun/.openclaw/workspace"
+WORKSPACE = "C:\\stock_trading" if os.name == "nt" else "/home/wenkun/.openclaw/workspace"
 STOCKS_FILE = f"{WORKSPACE}/stocks_memory.md"
 CONFIG_FILE = f"{WORKSPACE}/paper_trading_config.md"
 REPORT_FILE = f"{WORKSPACE}/paper_trading_report.md"
